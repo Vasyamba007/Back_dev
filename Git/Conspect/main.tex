@@ -1,0 +1,74 @@
+% Преамбула
+
+\documentclass{article}
+
+% Далее подключаем необходимые пакеты
+\usepackage[utf8]{inputenc}
+% Следующая группа пакетов делает возможным набор на русском языке.
+\usepackage[T2A]{fontenc}
+\usepackage[russian]{babel}
+% Пакет для формирования автоматических отступов
+\usepackage{indentfirst}
+% Пакет для возможности работы с рисунками
+\usepackage{graphicx}
+% Сообщаем, в каком каталоге находятся изображения
+\graphicspath{ {images/} }
+% Пакет отвечает за изменение размеров полей и геометрии вывода на странице текста в целом
+\usepackage[left=2cm, right=2cm, top=2cm, bottom=2cm, bindingoffset=0cm]{geometry}
+% Пакет с цветами
+\usepackage{xcolor}
+% Это пакеты для печати кода в документе
+\usepackage{listings}
+
+\lstset{
+    language={bash},      % Bash
+    extendedchars=\true,  % Поддрежка русского язка
+    keepspaces=true,      % Чтобы были пробелы в строках
+    basicstyle=\small\ttfamily, % Monospaced font
+    keywordstyle=\bfseries\textcolor{blue}, % Keywords are bold blue
+    morekeywords={git, add, clone, pull, push, commit, status}, % Additional keywords for highlighting
+    stringstyle=\textcolor{magenta},       % Strings are magenta
+}
+
+% Титульная часть добавляется в место документа, где находится команду \maketitle
+\title{Материалы по Git и GitHub}
+\author{Титов Василий Андреевич\thanks{Конспект составлен по материалам курса https://stepik.org/lesson/1941457/step/1?unit=1968198}}
+% Чтобы дата обновлялась автоматически надо заменить на \date\today
+\date\today
+
+
+% Начало нашшего документа, конец преамбулы
+\begin{document}
+
+% Эта команда создает титульную страницу
+\maketitle
+
+% Здесь будет автоматически генерироваться содержание документа
+\tableofcontents
+
+% Аннотация
+\begin{abstract}
+    Материалы по системе контроля версий Git и хранилищу репозиториев GitHub.
+\end{abstract}
+
+\section{Git}
+
+Git -- система контроля версий (https://git-scm.com/).
+
+\begin{lstlisting}
+    # русский язык
+    git clone https://github.com/user/repo.git
+    git add README.md
+    git commit -m "Add readme"
+    git push origin main
+    git status
+\end{lstlisting}
+
+
+\subsection{Основные команды}
+
+\section{GitHub}
+
+\end{document}
+
+
