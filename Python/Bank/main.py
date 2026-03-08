@@ -39,10 +39,44 @@ BIN_BY_SYSTEM = {
     "MASTERCARD": "510000",
 }
 
+TRANSACTION_HISTORY_HEADER = [
+    "timestamp,type,from_card,to_card,amount,mcc,cashback,description"
+]
+DEFAULT_CASHBACK_TRANSACTION = 0.00
+DEPOSIT_DESCRIPTION = "{amount:.2f}₽ → карта #{card_id}"
+TRANSFER_DESCRIPTION = "{amount:.2f}₽: карта #{from_card} → карта #{to_card}"
+PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id}"
+BALANCE_DESCRIPTION = "Баланс: {balance:.2f}₽"
+
 # =============================== ГЕНЕРАТОРЫ ДАННЫХ ===============================
 ISSUE_DATE_START = _dt.date(2022, 1, 1)
 ISSUE_DATE_GENERATOR = (ISSUE_DATE_START + _dt.timedelta(days=i) for i in _it.count())
 EXPIRY_YEARS = 4
+
+TIMESTAMP_START = _dt.datetime(2022, 1, 1, 9, 0, 0)
+
+
+def timestamp_generator():
+    for i in _it.count():
+        base_date = TIMESTAMP_START + _dt.timedelta(days=i)
+        hour = 9 + (i * 3) % 10        # цикличное смещение часа
+        minute = (i * 7) % 60          # цикличное смещение минут
+        second = (i * 11) % 60         # цикличное смещение секунд
+        yield base_date.replace(hour=hour % 24, minute=minute, second=second)
+
+
+TIMESTAMP_GENERATOR = timestamp_generator()
+
+
+def next_timestamp_after(issue_date: _dt.date) -> _dt.datetime:
+    """
+    Возвращает ближайший timestamp из генератора, который позже issue_date.
+    """
+    while True:
+        ts = next(TIMESTAMP_GENERATOR)
+        if ts.date() > issue_date:
+            return ts
+
 
 # =============================== ENUM'Ы ===============================
 class CardStatus(Enum):
@@ -53,33 +87,157 @@ class CardStatus(Enum):
 
 CARD_STATUS = CardStatus.ACTIVE
 
+
+class TransactionType(Enum):
+    DEPOSIT = "deposit"
+    TRANSFER = "transfer"
+    PAY = "pay"
+    INTEREST = "interest"
+
+
 # ============================== ОСНОВНЫЕ КЛАССЫ ===============================
 @dataclass
 class User:
     last_name: str
     first_name: str
+    pin: str
     phone: str
     user_id: int
 
     accounts: list = field(default_factory=list)
     cards: list = field(default_factory=list)
 
+    def change_pin(self, old_pin: str, new_pin: str):
+        if old_pin == self.pin:
+            self.pin = new_pin
+
 
 @dataclass
 class Account:
-    owner: User
-    account_number: str
+    owner: "User"
+    acc_id: str
     balance: float = DEFAULT_ACCOUNT_BALANCE
+    cashback_balance: float = DEFAULT_CASHBACK_BALANCE
 
 
 class Card:
-
-    def __init__(self, card_id: int, payment_system: str, pan: str):
+    def __init__(
+        self,
+        account,
+        card_id,
+        payment_system=DEFAULT_PAYMENT_SYSTEM,
+        pan=EMPTY_PAN,
+        issue_date=None,
+        expiry_date=None,
+        currency=CARD_CURRENCY,
+        status=CARD_STATUS,
+        bank=None,
+    ):
+        self.account = account
         self.card_id = card_id
         self.payment_system = payment_system
         self.pan = pan
-        self.issue_date = next(ISSUE_DATE_GENERATOR)
-        self.expiry_date = 
+        self.issue_date = issue_date
+        self.expiry_date = expiry_date
+        self.currency = currency
+        self.status = status
+        self.bank = bank
+
+        # Обновляем дату заведения и срок окончания карты
+        if self.issue_date is None:
+            self.issue_date = next(ISSUE_DATE_GENERATOR)
+        if self.expiry_date is None and self.issue_date is not None:
+            self.expiry_date = _dt.date(
+                self.issue_date.year + EXPIRY_YEARS,
+                self.issue_date.month,
+                self.issue_date.day,
+            )
+
+    def get_card_info(self, fields: list = None):
+        user = self.account.owner
+        data = {
+            "bank_name": f"Банк:          {self.bank.name}",
+            "bank_bic": f"БИК банка:     {self.bank.bic}",
+            "card_id": f"Карта #{self.card_id}",
+            "user_id": f"Пользователь:  {user.user_id} — {user.last_name} {user.first_name}",
+            "phone": f"Телефон:       {user.phone}",
+            "pan": f"PAN:           {self.pan}",
+            "acc_id": f"Счёт:          {self.account.acc_id}",
+            "payment_system": f"Плат. система: {self.payment_system}",
+            "currency": f"Валюта:        {self.currency}",
+            "status": f"Статус:        {self.status.value}",
+            "issue_date": f"Выпуск:        {self.issue_date}",
+            "expiry_date": f"Срок:          {self.expiry_date}",
+            "user_cards": f"Карты пользователя: {[card.pan for card in user.cards]}",
+            "cashback_balance": f"Кешбэк:        {self.account.cashback_balance:.2f}₽",
+            "balance": f"Баланс:        {self.account.balance:.2f}₽"
+        }
+
+        if fields is None:
+            fields = DEFAULT_CARD_INFO_FIELDS
+        return (
+            "\n".join([data[field] for field in fields if field in data])
+            + "\n"
+            + "-" * 50
+        )
+
+    def __repr__(self):
+        return (
+            f"Card(card_id={self.card_id}, pan={self.pan}, account={self.account}, "
+            f"status={self.status}, issue_date={self.issue_date}, expiry_date={self.expiry_date})"
+        )
+    
+    def get_balance(self):
+        return BALANCE_DESCRIPTION.format(balance=self.account.balance)
+     
+    def deposit(self, amount: float):
+        self.account.balance += amount
+        trans = Transaction(None, 
+                            self.card_id, 
+                            amount, 
+                            TransactionType.DEPOSIT,
+                            None,
+                            DEPOSIT_DESCRIPTION.format(amount=amount, card_id=self.card_id), 
+                            next_timestamp_after(self.issue_date))
+        self.bank.transaction_log.append(trans)
+
+    def transfer(self, to_card, amount: float):
+        self.account.balance -= amount
+        to_card.account.balance += amount
+        trans = Transaction(self.card_id, 
+                            to_card.card_id, 
+                            amount, 
+                            TransactionType.TRANSFER,
+                            None,
+                            TRANSFER_DESCRIPTION.format(amount=amount, from_card=self.card_id, to_card=to_card.card_id), 
+                            next_timestamp_after(max(self.issue_date, to_card.issue_date))
+                            )
+        self.bank.transaction_log.append(trans)
+    
+    def pay(self, amount: float, mcc: str):
+        self.account.balance -= amount
+        trans = Transaction(self.card_id, 
+                            None, 
+                            amount, 
+                            TransactionType.PAY,
+                            mcc,
+                            PAY_DESCRIPTION.format(amount=amount, mcc=mcc, card_id=self.card_id), 
+                            next_timestamp_after(self.issue_date)
+                            )
+        self.bank.transaction_log.append(trans)
+
+    def close(self):
+        self.status = CardStatus.CLOSED
+
+    def get_transaction_history(self):
+        for log in self.bank.get_global_history():
+            log = {key: value for key, value in zip(TRANSACTION_HISTORY_HEADER[0].split(','), log.split(','))}
+            if log['from_card'] == str(self.card_id) or log['to_card'] == str(self.card_id):
+                if log['type'] == 'deposit' or (log['type'] == 'transfer' and log['to_card'] == str(self.card_id)):
+                    log['amount'] = '+' + log['amount']
+                else:
+                    log['amount'] = '-' + log['amount']
+                yield ','.join([log[attr] for attr in TRANSACTION_HISTORY_HEADER[0].split(',')])
 
 
 @dataclass
@@ -87,20 +245,21 @@ class Bank:
     name: str
     bic: str
 
-    _user_id_seq: int = field(default_factory=lambda: _it.count(1), init=False)
-    _account_number_seq: int = field(default_factory=lambda: _it.count(1), init=False)
-    _cards_id_seq: int = field(default_factory=lambda: _it.count(1), init=False)
+    _user_seq: int = field(default_factory=lambda: _it.count(1), init=False)
+    _account_seq: int = field(default_factory=lambda: _it.count(1), init=False)
+    _card_seq: int = field(default_factory=lambda: _it.count(1), init=False)
     _pan_seq: int = field(default_factory=lambda: _it.count(1), init=False)
 
-    customers: dict = field(default_factory=dict, init=False)
-    accounts: dict = field(default_factory=dict, init=False)
-    cards: dict = field(default_factory=dict, init=False)
+    customers: dict = field(default_factory=dict)
+    accounts: dict = field(default_factory=dict)
+    cards: dict = field(default_factory=dict)
+    transaction_log: list = field(default_factory=list)
 
     def _next_account_number(self):
         prefix_left = ACCOUNT_TYPE_CODE + ACCOUNT_CURRENCY
         prefix_right = ACCOUNT_BRANCH
         bic_tail = self.bic[-3:]
-        serial = f"{next(self._account_number_seq):07d}"
+        serial = f"{next(self._account_seq):07d}"
 
         for control_digit in range(10):
             candidate_account_number = prefix_left + str(control_digit) + prefix_right + serial
@@ -110,9 +269,11 @@ class Bank:
             control_sum = sum(x % 10 for x in weighted)
             if control_sum % 10 == 0:
                 return candidate_account_number
-    
+
     def _generate_pan(self, system):
-        bin_code = BIN_BY_SYSTEM.get(system.upper(), BIN_BY_SYSTEM[DEFAULT_PAYMENT_SYSTEM])
+        bin_code = BIN_BY_SYSTEM.get(
+            system.upper(), BIN_BY_SYSTEM[DEFAULT_PAYMENT_SYSTEM]
+        )
         seq = f"{next(self._pan_seq):09d}"
         partial = bin_code + seq
         check = self._luhn(partial)
@@ -125,31 +286,60 @@ class Bank:
             digits[i] = doubled - 9 if doubled > 9 else doubled
         return (10 - sum(digits) % 10) % 10
 
-    def apply_for_card(self, last_name: str, first_name: str, phone: str, pin: str,  payment_system: str=DEFAULT_PAYMENT_SYSTEM) -> None:
-        
+    def apply_for_card(
+        self,
+        last_name,
+        first_name,
+        pin,
+        phone,
+        payment_system=DEFAULT_PAYMENT_SYSTEM,
+        card_class: type = Card,
+        **kwargs,
+    ):
         for id, user in self.customers.items():
             if (user.last_name, user.first_name, user.phone) == (last_name, first_name, phone):
                 user_id = id
                 break
         else:
-            user_id = next(self._user_id_seq)
-            self.customers[user_id] = User(last_name, first_name, phone, user_id)
+            user_id = next(self._user_seq)
+            self.customers[user_id] = User(last_name, first_name, pin, phone, user_id)
 
         user = self.customers[user_id]
-        new_account = Account(user, self._next_account_number())
-        self.accounts[new_account.account_number] = new_account
-        user.accounts.append(new_account)
 
-        new_card = Card(next(self._cards_id_seq), payment_system, self._generate_pan(payment_system),
-                        
-                        
-                        )
+        account = Account(user, self._next_account_number())
+        self.accounts[account.acc_id] = account
+        user.accounts.append(account)
 
+        card = Card(account, next(self._card_seq), payment_system, self._generate_pan(payment_system), bank=self)
+        self.cards[card.card_id] = card
+        user.cards.append(card)
 
-
-bank = Bank("Demo Bank", "044452345")
-bank.apply_for_card('Kovalchuck', 'Artem', '8-800-555-35-35', '1234')
-bank.apply_for_card('Titov', 'Vasiliy', '8-800-666-36-36', '1416')
-bank.apply_for_card('Titov', 'Vasiliy', '8-800-666-36-36', '2416')
-
-print(*bank.customers.values(), sep='\n')
+        return card
+    
+    def get_global_history(self):
+        print(TRANSACTION_HISTORY_HEADER[0])
+        self.transaction_log.sort(key=lambda trans: trans.timestamp)
+        for log in self.transaction_log:
+            history = []
+            for attr in TRANSACTION_HISTORY_HEADER[0].split(','):
+                if attr == 'type':
+                    history.append(log.type.value)
+                elif attr == 'amount' or attr == 'cashback':
+                    history.append(f'{getattr(log, attr):.2f}₽')
+                elif getattr(log, attr) is None:
+                    history.append('')
+                else:
+                    history.append(str(getattr(log, attr)))
+            yield ','.join(history)
+  
+          
+@dataclass
+class Transaction:
+    from_card: int | None
+    to_card: int | None
+    amount: float
+    type: TransactionType
+    mcc: str | None
+    description: str
+    timestamp: _dt.datetime
+    cashback: float = DEFAULT_CASHBACK_TRANSACTION
