@@ -47,6 +47,11 @@ DEPOSIT_DESCRIPTION = "{amount:.2f}₽ → карта #{card_id}"
 TRANSFER_DESCRIPTION = "{amount:.2f}₽: карта #{from_card} → карта #{to_card}"
 PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id}"
 BALANCE_DESCRIPTION = "Баланс: {balance:.2f}₽"
+CB_DEBIT_PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id} (кешбэк {cashback_amount:.2f}₽)"
+SAVING_INTEREST_DESCRIPTION = "Начислены проценты {interest:.2f}₽ по накопительной карте #{card_id}"
+
+DEBIT_DEFAULT_CASHBACK_RATE = 0.03 
+SAVING_CARD_DEFAULT_INTEREST = 0.015
 
 # =============================== ГЕНЕРАТОРЫ ДАННЫХ ===============================
 ISSUE_DATE_START = _dt.date(2022, 1, 1)
@@ -233,13 +238,94 @@ class Card:
         for log in self.bank.get_global_history():
             log = {key: value for key, value in zip(TRANSACTION_HISTORY_HEADER[0].split(','), log.split(','))}
             if log['from_card'] == str(self.card_id) or log['to_card'] == str(self.card_id):
-                if log['type'] == 'deposit' or (log['type'] == 'transfer' and log['to_card'] == str(self.card_id)):
+                if log['type'] in (TransactionType.DEPOSIT.value, TransactionType.INTEREST.value) or \
+                        (log['type'] == TransactionType.TRANSFER.value and log['to_card'] == str(self.card_id)):
                     log['amount'] = '+' + log['amount']
                 else:
                     log['amount'] = '-' + log['amount']
                 yield ','.join([log[attr] for attr in TRANSACTION_HISTORY_HEADER[0].split(',')])
 
 
+class SimpleDebitCard(Card):
+    pass
+
+
+class CashbackDebitCard(Card):
+    def __init__(
+        self,
+        account,
+        card_id,
+        payment_system=DEFAULT_PAYMENT_SYSTEM,
+        pan=EMPTY_PAN,
+        issue_date=None,
+        expiry_date=None,
+        currency=CARD_CURRENCY,
+        status=CARD_STATUS,
+        bank=None,
+        cashback_rate=DEBIT_DEFAULT_CASHBACK_RATE
+    ):
+        super().__init__(
+            account,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            currency,
+            status,
+            bank
+        )
+        self.cashback_rate = cashback_rate
+    
+    def pay(self, amount: float, mcc: str):
+        cashback_amount = round((amount * self.cashback_rate), 2)
+        self.account.cashback_balance += cashback_amount
+        super().pay(amount, mcc)
+        last_trans = self.bank.transaction_log[-1]
+        last_trans.cashback = cashback_amount
+        last_trans.description = CB_DEBIT_PAY_DESCRIPTION.format(
+                                                                amount=amount,
+                                                                mcc=mcc,
+                                                                card_id=self.card_id,
+                                                                cashback_amount=cashback_amount
+        )
+        
+
+class SavingCard(Card):
+    def __init__(
+        self,
+        account,
+        card_id,
+        payment_system=DEFAULT_PAYMENT_SYSTEM,
+        pan=EMPTY_PAN,
+        issue_date=None,
+        expiry_date=None,
+        currency=CARD_CURRENCY,
+        status=CARD_STATUS,
+        bank=None,
+        interest_rate=SAVING_CARD_DEFAULT_INTEREST
+    ):
+        super().__init__(
+            account,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            currency,
+            status,
+            bank
+        )
+        self.interest_rate = interest_rate
+    
+    def accrue_interest(self):
+        interest = round((self.account.balance * self.interest_rate), 2)
+        super().deposit(interest)
+        last_trans = self.bank.transaction_log[-1]
+        last_trans.type = TransactionType.INTEREST
+        last_trans.description = SAVING_INTEREST_DESCRIPTION.format(interest=interest, card_id=self.card_id)
+
+        
 @dataclass
 class Bank:
     name: str
@@ -286,6 +372,39 @@ class Bank:
             digits[i] = doubled - 9 if doubled > 9 else doubled
         return (10 - sum(digits) % 10) % 10
 
+    def issue_simple_debit_card(self, last_name, first_name, pin, phone, payment_system, **kwargs):
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=SimpleDebitCard,
+            **kwargs
+        )
+
+    def issue_cashback_debit_card(self, last_name, first_name, pin, phone, payment_system, **kwargs):
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=CashbackDebitCard,
+            **kwargs
+        )
+
+    def issue_saving_card(self, last_name, first_name, pin, phone, payment_system, **kwargs):
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=SavingCard,
+            **kwargs,
+        )
+
     def apply_for_card(
         self,
         last_name,
@@ -310,7 +429,14 @@ class Bank:
         self.accounts[account.acc_id] = account
         user.accounts.append(account)
 
-        card = Card(account, next(self._card_seq), payment_system, self._generate_pan(payment_system), bank=self)
+        card = card_class(
+            account,
+            next(self._card_seq),
+            payment_system,
+            self._generate_pan(payment_system),
+            bank=self,
+            **kwargs
+        )
         self.cards[card.card_id] = card
         user.cards.append(card)
 
