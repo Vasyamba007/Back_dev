@@ -2,6 +2,7 @@ import datetime as _dt
 import itertools as _it
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 
 
 # =============================== КОНСТАНТЫ ===============================
@@ -53,6 +54,16 @@ SAVING_INTEREST_DESCRIPTION = "Начислены проценты {interest:.2f
 DEBIT_DEFAULT_CASHBACK_RATE = 0.03 
 SAVING_CARD_DEFAULT_INTEREST = 0.015
 
+DEPOSIT_LIMIT = 1000000.00
+TRANSFER_LIMIT = 500000.00
+PAY_LIMIT = 500000.00
+MAX_CASHBACK_RATE = 0.10  # 10%
+MAX_SAVING_INTEREST_RATE = 0.3
+
+FORBIDDEN_MCC = {"7995", "4829", "6051"}
+
+RUSSIAN_PATTERN = r'^[А-ЯЁа-яё]+?(\-[А-ЯЁа-яё]+)?$' 
+
 # =============================== ГЕНЕРАТОРЫ ДАННЫХ ===============================
 ISSUE_DATE_START = _dt.date(2022, 1, 1)
 ISSUE_DATE_GENERATOR = (ISSUE_DATE_START + _dt.timedelta(days=i) for i in _it.count())
@@ -81,7 +92,7 @@ def next_timestamp_after(issue_date: _dt.date) -> _dt.datetime:
         ts = next(TIMESTAMP_GENERATOR)
         if ts.date() > issue_date:
             return ts
-
+        
 
 # =============================== ENUM'Ы ===============================
 class CardStatus(Enum):
@@ -100,6 +111,69 @@ class TransactionType(Enum):
     INTEREST = "interest"
 
 
+# ======================= КАТАЛОГ СООБЩЕНИЙ ОБ ОШИБКАХ =======================
+class BankError(Exception):
+    """Базовый класс для всех ошибок банковского приложения."""
+
+
+class ValidationError(BankError):
+    """Ошибка валидации пользовательских данных (форматы, обязательные поля, допустимые значения)."""
+
+    PIN_MISMATCH = "Введенный ПИН-код не соответствует текущему"
+    PIN_INVALID = "ПИН-код должен быть строкой из 4 символов"
+    PIN_FORMAT_INVALID = "ПИН-код должен состоять только из цифр"
+    NAME_INVALID = "Имя и фамилия должны быть на русском, без использования специальных символов"
+    AMOUNT_NEGATIVE = "Сумма должна быть положительной"
+    DEPOSIT_AMOUNT_NEGATIVE = "Сумма пополнений должна быть положительной"
+    CASHBACK_NEGATIVE = "Процент кешбэка на покупки должен быть положительным"
+    INTEREST_NEGATIVE = "Ставка по счету должна быть положительной"
+    PAY_AMOUNT_NEGATIVE = "Сумма покупки должна быть положительной"
+    INVALID_MCC = "Неверный код категории продавца (MCC)"
+    PAYMENT_SYSTEM_NOT_SUPPORTED = "Платежная система {payment_system} не поддерживается банком"
+
+
+class NotFoundError(BankError):
+    """Ошибка отсутствия объекта: карта, счёт, пользователь не найдены."""
+
+    RECIPIENT_NOT_FOUND = "Ошибка номером карты. Такой карты не существует."
+
+
+class AccessError(BankError):
+    """Ошибка доступа к объекту или операции: карта/счёт не активны, недоступны или не привязаны."""
+
+    CARD_CLOSED = "Карта закрыта или заблокирована. Невозможно провести операцию."
+    ACCOUNT_NOT_LINKED = "Карта не привязана к счёту"
+    BANK_NOT_LINKED = "Карта не привязана к банку"
+    RECIPIENT_ACCOUNT_NOT_LINKED = "Карта получателя не привязана к счёту"
+    RECIPIENT_CARD_CLOSED = "Карта получателя закрыта или заблокирована. Невозможно провести операцию."
+
+
+class BusinessRuleError(BankError):
+    """Ошибка бизнес-логики: нарушено ограничение по правилам банка
+    (лимиты, количество, уникальность, запрещённые операции)."""
+
+    DEPOSIT_LIMIT_EXCEEDED = "Превышен лимит депозита. Карта заблокирована до выяснения причин."
+    TRANSFER_LIMIT_EXCEEDED = "Подозрение на мошенническую операцию. Карта заблокирована до выяснения причин."
+    CASHBACK_LIMIT = "Процент кешбэка завышен, возможна техническая ошибка. Карта заблокирована до выяснения причин."
+    TRANSFER_TO_SELF = "Нельзя пересылать деньги самому себе"
+    USER_CONFLICT = "Пользователь с таким телефоном уже зарегистрирован"
+    TOO_MANY_DEBIT_CARDS = "У пользователя уже есть пять дебетовых карт"
+    MCC_FORBIDDEN = "Оплата отклонена. Покупки по {mcc} запрещены банком"
+    PURCHASE_LIMIT_EXCEEDED = "Сумма оплаты превышает лимит. Операция заблокирована до выяснения причин."
+    PAYMENT_NOT_ALLOWED_FOR_SAVING = "С накопительного счёта нельзя списывать покупки"
+    SAVING_RATE_TOO_HIGH = (
+        "Ставка накопления завышена, возможна техническая ошибка. "
+        "Карта заблокирована до выяснения причины."
+    )
+
+
+class InsufficientFundsError(BankError):
+    """Ошибка недостатка денег."""
+
+    INSUFFICIENT_FUNDS_FOR_PAYMENT = "Недостаточно денег для оплаты."
+    INSUFFICIENT_FUNDS_FOR_TRANSFER = "Недостаточно денег для осуществления перевода."
+
+
 # ============================== ОСНОВНЫЕ КЛАССЫ ===============================
 @dataclass
 class User:
@@ -113,9 +187,15 @@ class User:
     cards: list = field(default_factory=list)
 
     def change_pin(self, old_pin: str, new_pin: str):
+        if not isinstance(old_pin, str) or not isinstance(new_pin, str) or len(old_pin) != 4 or len(new_pin) != 4:
+            raise ValidationError(ValidationError.PIN_INVALID)
+        if not old_pin.isdigit() or not new_pin.isdigit():
+            raise ValidationError(ValidationError.PIN_FORMAT_INVALID)
         if old_pin == self.pin:
             self.pin = new_pin
-
+        else:
+            raise ValidationError(ValidationError.PIN_MISMATCH)
+    
 
 @dataclass
 class Account:
@@ -159,6 +239,11 @@ class Card:
             )
 
     def get_card_info(self, fields: list = None):
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        
         user = self.account.owner
         data = {
             "bank_name": f"Банк:          {self.bank.name}",
@@ -177,9 +262,10 @@ class Card:
             "cashback_balance": f"Кешбэк:        {self.account.cashback_balance:.2f}₽",
             "balance": f"Баланс:        {self.account.balance:.2f}₽"
         }
-
+        
         if fields is None:
             fields = DEFAULT_CARD_INFO_FIELDS
+
         return (
             "\n".join([data[field] for field in fields if field in data])
             + "\n"
@@ -193,9 +279,23 @@ class Card:
         )
     
     def get_balance(self):
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
         return BALANCE_DESCRIPTION.format(balance=self.account.balance)
      
     def deposit(self, amount: float):
+        if amount <= 0:
+            raise ValidationError(ValidationError.DEPOSIT_AMOUNT_NEGATIVE)
+        if not self.account:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        if amount > DEPOSIT_LIMIT:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.DEPOSIT_LIMIT_EXCEEDED)
+
         self.account.balance += amount
         trans = Transaction(None, 
                             self.card_id, 
@@ -207,6 +307,26 @@ class Card:
         self.bank.transaction_log.append(trans)
 
     def transfer(self, to_card, amount: float):
+        if amount <= 0:
+            raise ValidationError(ValidationError.AMOUNT_NEGATIVE)
+        if to_card is None:
+            raise NotFoundError(NotFoundError.RECIPIENT_NOT_FOUND)
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if to_card.account is None:
+            raise AccessError(AccessError.RECIPIENT_ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        if to_card.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.RECIPIENT_CARD_CLOSED)
+        if self.card_id == to_card.card_id:
+            raise BusinessRuleError(BusinessRuleError.TRANSFER_TO_SELF)
+        if amount > TRANSFER_LIMIT:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.TRANSFER_LIMIT_EXCEEDED)
+        if self.account.balance < amount:
+            raise InsufficientFundsError(InsufficientFundsError.INSUFFICIENT_FUNDS_FOR_TRANSFER)
+
         self.account.balance -= amount
         to_card.account.balance += amount
         trans = Transaction(self.card_id, 
@@ -214,12 +334,32 @@ class Card:
                             amount, 
                             TransactionType.TRANSFER,
                             None,
-                            TRANSFER_DESCRIPTION.format(amount=amount, from_card=self.card_id, to_card=to_card.card_id), 
+                            TRANSFER_DESCRIPTION.format(
+                                                        amount=amount,
+                                                        from_card=self.card_id,
+                                                        to_card=to_card.card_id
+                            ), 
                             next_timestamp_after(max(self.issue_date, to_card.issue_date))
                             )
         self.bank.transaction_log.append(trans)
-    
+
     def pay(self, amount: float, mcc: str):
+        if amount <= 0:
+            raise ValidationError(ValidationError.PAY_AMOUNT_NEGATIVE)
+        if not isinstance(mcc, str) or len(mcc) != 4 or not mcc.isdigit():
+            raise ValidationError(ValidationError.INVALID_MCC)
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        if mcc in FORBIDDEN_MCC:
+            raise BusinessRuleError(BusinessRuleError.MCC_FORBIDDEN.format(mcc=mcc))
+        if amount > PAY_LIMIT:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.PURCHASE_LIMIT_EXCEEDED)
+        if self.account.balance < amount:
+            raise InsufficientFundsError(InsufficientFundsError.INSUFFICIENT_FUNDS_FOR_PAYMENT)
+
         self.account.balance -= amount
         trans = Transaction(self.card_id, 
                             None, 
@@ -235,6 +375,14 @@ class Card:
         self.status = CardStatus.CLOSED
 
     def get_transaction_history(self):
+        if not self.account:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if not self.bank:
+            raise AccessError(AccessError.BANK_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+
+        res = []
         for log in self.bank.get_global_history():
             log = {key: value for key, value in zip(TRANSACTION_HISTORY_HEADER[0].split(','), log.split(','))}
             if log['from_card'] == str(self.card_id) or log['to_card'] == str(self.card_id):
@@ -243,8 +391,9 @@ class Card:
                     log['amount'] = '+' + log['amount']
                 else:
                     log['amount'] = '-' + log['amount']
-                yield ','.join([log[attr] for attr in TRANSACTION_HISTORY_HEADER[0].split(',')])
-
+                res.append(','.join([log[attr] for attr in TRANSACTION_HISTORY_HEADER[0].split(',')]))
+        return res
+        
 
 class SimpleDebitCard(Card):
     pass
@@ -278,18 +427,48 @@ class CashbackDebitCard(Card):
         self.cashback_rate = cashback_rate
     
     def pay(self, amount: float, mcc: str):
+        # т.к. порядок вызова исключений отличается от порядка в родительском классе,
+        # то заново переопределяем весь метод
+        if amount <= 0:
+            raise ValidationError(ValidationError.PAY_AMOUNT_NEGATIVE)
+        if not isinstance(mcc, str) or len(mcc) != 4 or not mcc.isdigit():
+            raise ValidationError(ValidationError.INVALID_MCC)
+        if self.cashback_rate < 0:
+            raise ValidationError(ValidationError.CASHBACK_NEGATIVE)
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        if self.cashback_rate >= MAX_CASHBACK_RATE:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.CASHBACK_LIMIT)
+        if mcc in FORBIDDEN_MCC:
+            raise BusinessRuleError(BusinessRuleError.MCC_FORBIDDEN.format(mcc=mcc))
+        if amount > PAY_LIMIT:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.PURCHASE_LIMIT_EXCEEDED)
+        if self.account.balance < amount:
+            raise InsufficientFundsError(InsufficientFundsError.INSUFFICIENT_FUNDS_FOR_PAYMENT)
+
         cashback_amount = round((amount * self.cashback_rate), 2)
         self.account.cashback_balance += cashback_amount
-        super().pay(amount, mcc)
-        last_trans = self.bank.transaction_log[-1]
-        last_trans.cashback = cashback_amount
-        last_trans.description = CB_DEBIT_PAY_DESCRIPTION.format(
-                                                                amount=amount,
-                                                                mcc=mcc,
-                                                                card_id=self.card_id,
-                                                                cashback_amount=cashback_amount
-        )
-        
+        self.account.balance -= amount
+        trans = Transaction(self.card_id, 
+                            None, 
+                            amount, 
+                            TransactionType.PAY,
+                            mcc,
+                            CB_DEBIT_PAY_DESCRIPTION.format(
+                                                            amount=amount,
+                                                            mcc=mcc,
+                                                            card_id=self.card_id,
+                                                            cashback_amount=cashback_amount
+                            ), 
+                            next_timestamp_after(self.issue_date),
+                            cashback_amount
+                            )
+        self.bank.transaction_log.append(trans)
+
 
 class SavingCard(Card):
     def __init__(
@@ -319,13 +498,33 @@ class SavingCard(Card):
         self.interest_rate = interest_rate
     
     def accrue_interest(self):
-        interest = round((self.account.balance * self.interest_rate), 2)
-        super().deposit(interest)
-        last_trans = self.bank.transaction_log[-1]
-        last_trans.type = TransactionType.INTEREST
-        last_trans.description = SAVING_INTEREST_DESCRIPTION.format(interest=interest, card_id=self.card_id)
+        # т.к. порядок вызова исключений отличается от порядка в родительском классе,
+        # то заново переопределяем весь метод
+        if self.interest_rate < 0:
+            raise ValidationError(ValidationError.INTEREST_NEGATIVE)
+        if self.account is None:
+            raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
+        if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
+            raise AccessError(AccessError.CARD_CLOSED)
+        if self.interest_rate >= MAX_SAVING_INTEREST_RATE:
+            self.status = CardStatus.BLOCKED
+            raise BusinessRuleError(BusinessRuleError.SAVING_RATE_TOO_HIGH)
 
-        
+        interest = round((self.account.balance * self.interest_rate), 2)
+        self.account.balance += interest
+        trans = Transaction(None, 
+                            self.card_id, 
+                            interest, 
+                            TransactionType.INTEREST,
+                            None,
+                            SAVING_INTEREST_DESCRIPTION.format(interest=interest, card_id=self.card_id), 
+                            next_timestamp_after(self.issue_date))
+        self.bank.transaction_log.append(trans)
+    
+    def pay(self, *args, **kwargs):
+        raise BusinessRuleError(BusinessRuleError.PAYMENT_NOT_ALLOWED_FOR_SAVING)
+
+
 @dataclass
 class Bank:
     name: str
@@ -402,7 +601,7 @@ class Bank:
             phone,
             payment_system,
             card_class=SavingCard,
-            **kwargs,
+            **kwargs
         )
 
     def apply_for_card(
@@ -413,17 +612,33 @@ class Bank:
         phone,
         payment_system=DEFAULT_PAYMENT_SYSTEM,
         card_class: type = Card,
-        **kwargs,
+        **kwargs
     ):
+        if not (isinstance(pin, str) and pin.isdigit()):
+            raise ValidationError(ValidationError.PIN_FORMAT_INVALID)
+        if not (isinstance(pin, str) and len(pin) == 4):
+            raise ValidationError(ValidationError.PIN_INVALID)
+        if re.match(RUSSIAN_PATTERN, last_name) is None:
+            raise ValidationError(ValidationError.NAME_INVALID)
+        if re.match(RUSSIAN_PATTERN, first_name) is None:
+            raise ValidationError(ValidationError.NAME_INVALID)
+        if payment_system.upper() not in BIN_BY_SYSTEM:
+            raise ValidationError(ValidationError.PAYMENT_SYSTEM_NOT_SUPPORTED.format(payment_system=payment_system))
+
         for id, user in self.customers.items():
             if (user.last_name, user.first_name, user.phone) == (last_name, first_name, phone):
                 user_id = id
                 break
+            if user.phone == phone:
+                raise BusinessRuleError(BusinessRuleError.USER_CONFLICT)
         else:
             user_id = next(self._user_seq)
             self.customers[user_id] = User(last_name, first_name, pin, phone, user_id)
 
         user = self.customers[user_id]
+
+        if len(user.cards) >= 5:
+            raise BusinessRuleError(BusinessRuleError.TOO_MANY_DEBIT_CARDS)
 
         account = Account(user, self._next_account_number())
         self.accounts[account.acc_id] = account
@@ -441,7 +656,7 @@ class Bank:
         user.cards.append(card)
 
         return card
-    
+        
     def get_global_history(self):
         print(TRANSACTION_HISTORY_HEADER[0])
         self.transaction_log.sort(key=lambda trans: trans.timestamp)
@@ -469,3 +684,7 @@ class Transaction:
     description: str
     timestamp: _dt.datetime
     cashback: float = DEFAULT_CASHBACK_TRANSACTION
+
+
+# TO DO Добавить новые методы: оплату кешбэком, перевод в другой банк, ввести таблицу кешбэка на разные товары
+# TO DO Выпустить новые карты: кредитная, VIP карта (два в одном и кредитка и дебетовая).
