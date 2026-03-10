@@ -3,7 +3,7 @@ import itertools as _it
 from dataclasses import dataclass, field
 from enum import Enum
 import re
-
+from functools import wraps
 
 # =============================== КОНСТАНТЫ ===============================
 DEFAULT_CARD_INFO_FIELDS = [
@@ -174,6 +174,16 @@ class InsufficientFundsError(BankError):
     INSUFFICIENT_FUNDS_FOR_TRANSFER = "Недостаточно денег для осуществления перевода."
 
 
+def print_error(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except BankError as e:
+            print(e)
+    return wrapper
+
+
 # ============================== ОСНОВНЫЕ КЛАССЫ ===============================
 @dataclass
 class User:
@@ -186,6 +196,7 @@ class User:
     accounts: list = field(default_factory=list)
     cards: list = field(default_factory=list)
 
+    @print_error
     def change_pin(self, old_pin: str, new_pin: str):
         if not isinstance(old_pin, str) or not isinstance(new_pin, str) or len(old_pin) != 4 or len(new_pin) != 4:
             raise ValidationError(ValidationError.PIN_INVALID)
@@ -238,6 +249,7 @@ class Card:
                 self.issue_date.day,
             )
 
+    @print_error
     def get_card_info(self, fields: list = None):
         if self.account is None:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
@@ -278,13 +290,15 @@ class Card:
             f"status={self.status}, issue_date={self.issue_date}, expiry_date={self.expiry_date})"
         )
     
+    @print_error
     def get_balance(self):
         if self.account is None:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
         if self.status in (CardStatus.CLOSED, CardStatus.BLOCKED):
             raise AccessError(AccessError.CARD_CLOSED)
         return BALANCE_DESCRIPTION.format(balance=self.account.balance)
-     
+
+    @print_error 
     def deposit(self, amount: float):
         if amount <= 0:
             raise ValidationError(ValidationError.DEPOSIT_AMOUNT_NEGATIVE)
@@ -306,6 +320,7 @@ class Card:
                             next_timestamp_after(self.issue_date))
         self.bank.transaction_log.append(trans)
 
+    @print_error
     def transfer(self, to_card, amount: float):
         if amount <= 0:
             raise ValidationError(ValidationError.AMOUNT_NEGATIVE)
@@ -343,6 +358,7 @@ class Card:
                             )
         self.bank.transaction_log.append(trans)
 
+    @print_error
     def pay(self, amount: float, mcc: str):
         if amount <= 0:
             raise ValidationError(ValidationError.PAY_AMOUNT_NEGATIVE)
@@ -374,6 +390,7 @@ class Card:
     def close(self):
         self.status = CardStatus.CLOSED
 
+    @print_error
     def get_transaction_history(self):
         if not self.account:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
@@ -426,6 +443,7 @@ class CashbackDebitCard(Card):
         )
         self.cashback_rate = cashback_rate
     
+    @print_error
     def pay(self, amount: float, mcc: str):
         # т.к. порядок вызова исключений отличается от порядка в родительском классе,
         # то заново переопределяем весь метод
@@ -497,6 +515,7 @@ class SavingCard(Card):
         )
         self.interest_rate = interest_rate
     
+    @print_error
     def accrue_interest(self):
         # т.к. порядок вызова исключений отличается от порядка в родительском классе,
         # то заново переопределяем весь метод
@@ -521,6 +540,7 @@ class SavingCard(Card):
                             next_timestamp_after(self.issue_date))
         self.bank.transaction_log.append(trans)
     
+    @print_error
     def pay(self, *args, **kwargs):
         raise BusinessRuleError(BusinessRuleError.PAYMENT_NOT_ALLOWED_FOR_SAVING)
 
@@ -604,6 +624,7 @@ class Bank:
             **kwargs
         )
 
+    @print_error
     def apply_for_card(
         self,
         last_name,
@@ -688,3 +709,4 @@ class Transaction:
 
 # TO DO Добавить новые методы: оплату кешбэком, перевод в другой банк, ввести таблицу кешбэка на разные товары
 # TO DO Выпустить новые карты: кредитная, VIP карта (два в одном и кредитка и дебетовая).
+# TO DO Использовать модуль Decimal для работы с десятичными дробями
